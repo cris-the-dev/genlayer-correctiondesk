@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CorrectionDesk</title><meta name="description" content="Bounties for factual errors in published articles, judged by GenLayer validators"><meta name="theme-color" content="#EEE7D7">
+<link rel="stylesheet" href="app.css"><link rel="icon" href="logo.svg" type="image/svg+xml">
+<style>
+.notice{margin-top:14px;padding:12px 16px;border:1px dashed var(--ink);font-size:15px;background:var(--sheet)}
+.notice b{font:600 11px var(--mono);letter-spacing:.08em;text-transform:uppercase;display:block;margin-bottom:4px}
+.ruling i{display:block;margin-top:6px;font-size:14px;color:var(--mut)}
+.sig{word-break:break-all;font:12px/1.5 var(--mono)}
+.quote s{text-decoration-color:var(--blood);text-decoration-thickness:2px}
+.more{margin-top:12px}
+</style>
+</head><body>
+<div class="bar"><div class="w"><span class="who">cristhedev / genlayer builds</span><nav id="sites"></nav></div></div>
+<header class="mast"><div class="w">
+  <div class="top"><span class="live">Corrections desk open · Testnet Bradbury</span>
+    <div class="links">
+      <a id="contract-link" href="#">Contract ↗</a>
+      <a href="https://github.com/cris-the-dev/genlayer-correctiondesk">Source ↗</a>
+      <button id="connect" type="button">Connect wallet</button>
+    </div></div>
+  <div class="title">
+    <svg viewBox="0 0 64 64" aria-hidden="true"><use href="logo.svg#m"/></svg>
+    <h1>Correction<em>Desk</em></h1>
+    <p>Publishers fund a bounty; readers who prove a factual error get paid. GenLayer validators judge.</p>
+  </div>
+</div></header>
+<div class="w"><div class="stats" id="stats">
+    <div class="stat"><b>–</b><span>Articles</span></div><div class="stat"><b>–</b><span>Reports</span></div>
+    <div class="stat"><b>–</b><span>Corrections paid</span></div><div class="stat"><b>–</b><span>Bounty pools (GEN)</span></div>
+  </div></div>
+<main class="w">
+  <p id="status" class="status" hidden></p>
+  <div class="grid">
+    <div>
+      <section>
+        <p class="label">Articles on the desk</p>
+        <div class="list" id="articles"><p class="empty">Reading the contract…</p></div>
+      </section>
+      <section id="detail" hidden></section>
+    </div>
+
+    <aside>
+      <section>
+        <p class="label">How a report is judged</p>
+        <ol class="how">
+          <li><span>I</span><div><b>Bounty</b><p>The publisher registers the article's URL, a reward per correction and a report fee, and funds the pool.</p></div></li>
+          <li><span>II</span><div><b>Report</b><p>A reader quotes one statement, cites a source that contradicts it, gives the SHA-256 of both pages as they saw them and pays the fee.</p></div></li>
+          <li><span>III</span><div><b>Quote check</b><p>Validators fetch the article, check its hash and look for the quote in its text. No match: <i>quote not found</i>.</p></div></li>
+          <li><span>IV</span><div><b>Contradiction</b><p>They fetch the source, check its hash and agree on one question: does the source directly contradict a factual claim in the statement?</p></div></li>
+        </ol>
+        <div class="outcomes">
+          <div class="ok"><b>Accepted</b>fee back plus the reward; the correction goes on the record</div>
+          <div class="bad"><b>Rejected</b>the fee goes to the article's pool</div>
+        </div>
+      </section>
+      <section>
+        <p class="label">Disclosures</p>
+        <div class="notice"><b>Pinned pages</b>Both pages are bound to the hashes in the report. If either page changes before validators fetch it, or cannot be fetched, the report reverts, nothing is recorded and the fee stays with you.</div>
+        <div class="notice"><b>What the verdict means</b>Validators agree only on the verdict. The one-sentence note is the leader's own and is not checked by consensus.</div>
+        <div class="notice"><b>One payout per error</b>A statement is paid once per article. A report needs the pool to cover one reward; the publisher can withdraw the pool at any time.</div>
+      </section>
+      <section>
+        <details>
+          <summary>Register an article</summary>
+          <form id="register">
+            <label>Article URL<input name="url" type="url" pattern="https?://.{3,300}" required placeholder="https://…"></label>
+            <label>Headline<input name="title" minlength="3" maxlength="120" required></label>
+            <div class="row">
+              <label>Reward (GEN)<input name="reward" inputmode="decimal" value="0.001" required></label>
+              <label>Report fee (GEN)<input name="fee" inputmode="decimal" value="0.0001" required></label>
+            </div>
+            <label>Initial pool (GEN)<input name="pool" inputmode="decimal" value="0.002" required></label>
+            <button type="submit">Fund pool and register</button>
+          </form>
+        </details>
+      </section>
+    </aside>
+  </div>
+</main>
+
+<script type="module">
+import { contract, wireWallet, send, status, gen, toWei, esc, short, $, EXPLORER, payingTx, finalizeTx } from "./gl.js";
+const ADDR = "0x72BC664a5A060326a8679Ed464DE2E68141f5982";
+const cd = contract(ADDR);
+const B = BigInt, PER = 20;
+let me = null, items = [], view = { id: null, reports: [], next: 0, payouts: [], pnext: 0 };
+const when = (ts) => ts ? new Date(ts * 1000).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" }) + " UTC" : "–";
+const addr = (a) => `<a class="mono" href="${EXPLORER}/address/${esc(a)}">${short(a)}</a>${me && a.toLowerCase() === me.toLowerCase() ? " (you)" : ""}`;
+const sha256 = async (buf) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", buf))].map((b) => b.toString(16).padStart(2, "0")).join("");
+const cls = { accepted: "ok", quote_not_found: "bad", not_contradicted: "bad" };
+const TAG = { accepted: "corrected", quote_not_found: "not in article", not_contradicted: "not contradicted" };
+$("#contract-link").href = `${EXPLORER}/address/${ADDR}`;
+$("#contract-link").textContent = `Contract ${short(ADDR)} ↗`;
+
+async function load(openId) {
+  try {
+    const all = [];
+    for (let s = 0; s !== null; ) { const r = await cd.read("get_articles", [s, 50]); all.push(...r.items); s = r.next; }
+    items = all.reverse();
+    const sum = (k) => items.reduce((t, a) => t + B(a[k]), 0n);
+    $("#stats").innerHTML = [[items.length, "Articles"], [sum("reports"), "Reports"], [sum("corrections"), "Corrections paid"], [gen(sum("pool")), "Bounty pools (GEN)"]]
+      .map(([v, l]) => `<div class="stat"><b>${v}</b><span>${l}</span></div>`).join("");
+    $("#articles").innerHTML = items.length ? items.map((a) => `<a class="item" href="#article-${a.id}" data-id="${a.id}">
+      <div><b>${esc(a.title)}</b><small>#${a.id} · ${a.corrections} corrected · ${gen(a.reward)} GEN reward</small></div></a>`).join("")
+      : `<p class="empty">No articles yet.</p>`;
+    const h = location.hash.match(/^#article-(\d+)$/), id = openId ?? (h ? Number(h[1]) : null);
+    if (items.length) await open(Number.isInteger(id) && items.some((a) => a.id === id) ? id : items[0].id);
+  } catch (e) {
+    $("#articles").innerHTML = `<p class="empty">Could not read the contract: ${esc(e.message)}</p>`;
+  }
+}
+async function moreReports() {
+  const r = await cd.read("get_reports", [view.id, view.next, PER, false]);
+  view.reports.push(...r.items);
+  view.next = r.next;
+}
+async function morePayouts() {
+  const r = await cd.read("get_payouts", [view.pnext, 20, true]);
+  view.payouts.push(...r.items);
+  view.pnext = r.next;
+}
+async function open(id) {
+  view = { id, reports: [], next: 0, payouts: [], pnext: 0 };
+  await moreReports();
+  await morePayouts();
+  await show();
+}
+
+function actions(a, recov) {
+  if (!me) return `<p class="connect-hint">Connect a wallet to report an error or manage the bounty.</p>`;
+  const out = [], mine = (x) => x.toLowerCase() === me.toLowerCase(), low = B(a.pool) < B(a.reward);
+  out.push(`<form data-form="report"><b>Report a factual error</b>
+    <label>Statement, quoted exactly from the article (20-500 characters)<textarea name="quote" minlength="20" maxlength="500" required></textarea></label>
+    <label>Source that contradicts it<input name="source" type="url" pattern="https?://.{3,300}" required placeholder="https://…"></label>
+    <div class="row"><label>Article SHA-256<input name="asha" pattern="[0-9a-fA-F]{64}" required></label><label>Source SHA-256<input name="ssha" pattern="[0-9a-fA-F]{64}" required></label></div>
+    <p class="hint">The hashes pin the pages as you read them. “Fill hashes” fetches both pages from your browser; most sites block that, so run <code>curl -s URL | shasum -a 256</code> instead.</p>
+    <label>Where the source says it (optional, max 500 characters; not evidence)<textarea name="why" maxlength="500"></textarea></label>
+    <div class="row"><button type="button" class="ghost" data-act="hashes">Fill hashes</button>
+    <button${low ? ` disabled title="The pool cannot cover a reward"` : ""}>Report for ${gen(a.fee)} GEN</button></div></form>`);
+  if (mine(a.publisher)) {
+    out.push(`<form data-form="fund" class="row" style="align-items:end"><label>Add to pool (GEN)<input name="amount" inputmode="decimal" required></label><div><button class="ghost">Fund</button></div></form>`);
+    if (B(a.pool) > 0n) out.push(`<form data-form="withdraw_pool" class="row" style="align-items:end"><label>Withdraw from pool (max ${gen(a.pool)} GEN)<input name="amount" inputmode="decimal" required></label><div><button class="ghost">Withdraw</button></div></form>`);
+  }
+  if (B(recov) > 0n) out.push(`<form data-form="recover" class="row" style="align-items:end"><label>Recover ${gen(recov)} GEN from a failed transfer, to<input name="to" pattern="0x[0-9a-fA-F]{40}" value="${esc(me)}" required></label><div><button>Recover</button></div></form>`);
+  return `<div style="display:grid;gap:16px;margin-top:20px">${out.join("")}</div>`;
+}
+
+function verdict(r) {
+  const head = { accepted: "Consensus: the source contradicts the statement", quote_not_found: "The quote is not in the article", not_contradicted: "Consensus: the source does not contradict it" }[r.verdict];
+  const body = r.verdict === "accepted" ? "Reward and fee paid to the reader." : "Fee added to the pool.";
+  return `<div class="ruling ${cls[r.verdict]}"><b>${head}</b>${body}${r.note ? `<i>Leader's note (not verified by consensus): ${esc(r.note)}</i>` : ""}</div>`;
+}
+
+async function show() {
+  const a = items.find((x) => x.id === view.id);
+  const [recov, pub] = await Promise.all([me ? cd.read("get_recoverable", [me]) : 0, cd.read("get_publisher", [a.publisher])]);
+  const el = $("#detail");
+  el.hidden = false;
+  el.innerHTML = `<div class="dhead"><div><small>Article #${a.id} · registered ${when(a.at)}</small><h2>${esc(a.title)}</h2>
+    <p><a href="${esc(a.url)}" rel="noopener nofollow">${esc(a.url)} ↗</a></p><p>publisher ${addr(a.publisher)} · ${pub.corrections} corrections across ${pub.articles} articles</p></div></div>
+    <div class="mini">
+      <div><span>Pool</span><b>${gen(a.pool)} GEN</b></div>
+      <div><span>Reward</span><b>${gen(a.reward)} GEN</b></div>
+      <div><span>Report fee</span><b>${gen(a.fee)} GEN</b></div>
+      <div><span>Corrected / reports</span><b>${a.corrections} / ${a.reports}</b></div>
+    </div>
+    <h3>Corrections log (${a.reports})</h3>
+    ${view.reports.length ? view.reports.map((r) => `<div class="case">
+      <div class="case-top"><span class="id">${r.id}</span><span class="tag ${cls[r.verdict]}">${TAG[r.verdict]}</span>
+        <span class="by">reported by ${addr(r.reporter)} · ${when(r.at)}</span>
+        <span class="by">source <a href="${esc(r.source_url)}" rel="noopener nofollow">${esc(r.source_url)}</a> · sha256 ${r.source_sha256.slice(0, 16)}…</span></div>
+      <blockquote class="quote">${r.verdict === "accepted" ? `<s>${esc(r.quote)}</s>` : esc(r.quote)}</blockquote>
+      ${verdict(r)}
+    </div>`).join("") : `<p class="hint">No reports yet.</p>`}
+    ${view.next !== null ? `<button class="ghost more" data-act="more-reports">More reports</button>` : ""}
+    <h3>Unsettled transfers</h3>
+    <p class="hint">A payment is marked delivered or failed from its own transfer result, once the paying transaction is finalized. Anyone can settle.</p>
+    ${view.payouts.length ? `<div class="tbl"><table><tbody>${view.payouts.map((p) => `<tr><td class="num mut">#${p.id}</td><td>${esc(p.kind)}, ${gen(p.amount)} GEN to ${addr(p.to)}</td><td class="r">${me ? `<button class="ghost" data-act="settle_payout" data-arg="${p.id}">Settle</button>` : ""}</td></tr>`).join("")}</tbody></table></div>`
+      : `<p class="hint">None${view.pnext !== null ? " in the range read so far" : ""}.</p>`}
+    ${view.pnext !== null ? `<button class="ghost more" data-act="more-payouts">More transfers</button>` : ""}
+    ${actions(a, recov)}`;
+  document.querySelectorAll("#articles .item").forEach((x) => x.toggleAttribute("aria-current", Number(x.dataset.id) === a.id));
+}
+
+async function settle(pid) {
+  const p = await cd.read("get_payout", [pid]);
+  let tx = payingTx(ADDR, p.sender, p.at);
+  if (!tx) tx = prompt(`Payout #${pid} was created by a transaction from ${p.sender} at ${when(p.at)}. Paste that GenLayer transaction hash (0x…):`)?.trim();
+  if (!tx) return;
+  status(`Settle payout #${pid}: looking up the finalization of ${short(tx)}…`);
+  const fin = await finalizeTx(tx).catch(() => null);
+  if (!fin) return status(`Settle payout #${pid}: the paying transaction is not finalized yet (or not found). Try again later.`, true);
+  if (await send(cd, `Settle payout #${pid}`, "settle_payout", [pid, tx, fin], 0n, async () => (await cd.read("get_payout", [pid])).status !== "SENT")) load(view.id);
+}
+const hashOf = (url) => fetch(url).then((r) => (r.ok ? r.arrayBuffer() : Promise.reject())).then(sha256);
+
+$("#articles").addEventListener("click", (e) => { const t = e.target.closest(".item[data-id]"); if (t) { e.preventDefault(); history.replaceState(null, "", `#article-${t.dataset.id}`); open(Number(t.dataset.id)); $("#detail").scrollIntoView({ behavior: "smooth" }); } });
+$("#detail").addEventListener("click", async (e) => {
+  const fn = e.target.dataset?.act, a = items.find((x) => x.id === view.id);
+  if (!fn) return;
+  if (fn === "more-reports") { await moreReports(); return show(); }
+  if (fn === "more-payouts") { await morePayouts(); return show(); }
+  if (fn === "settle_payout") return settle(Number(e.target.dataset.arg));
+  if (fn === "hashes") {
+    const f = e.target.closest("form");
+    const [x, y] = await Promise.all([hashOf(a.url).catch(() => ""), f.source.value ? hashOf(f.source.value).catch(() => "") : ""]);
+    if (x) f.asha.value = x;
+    if (y) f.ssha.value = y;
+    status(x && y ? "Both hashes filled from your browser." : `Could not read ${x ? "the source" : "the article"} from the browser (blocked by the site). Hash it with curl.`, !(x && y));
+  }
+});
+$("#detail").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = e.target, fn = f.dataset.form, id = view.id, a = items.find((x) => x.id === id);
+  let args, value = 0n, check, payee; // payee: who the call may pay (see gl.js)
+  try {
+    if (fn === "report") {
+      args = [id, f.quote.value, f.asha.value.toLowerCase(), f.source.value.trim(), f.ssha.value.toLowerCase(), f.why.value];
+      value = B(a.fee); payee = me; check = async () => (await cd.read("get_article", [id])).reports === a.reports + 1;
+    } else if (fn === "fund") { args = [id]; value = toWei(f.amount.value); check = async () => B((await cd.read("get_article", [id])).pool) === B(a.pool) + value; }
+    else if (fn === "withdraw_pool") { const v = toWei(f.amount.value); args = [id, v]; payee = a.publisher; check = async () => B((await cd.read("get_article", [id])).pool) === B(a.pool) - v; }
+    else { args = [f.to.value]; payee = f.to.value; check = async () => B(await cd.read("get_recoverable", [me])) === 0n; }
+  } catch (err) { return status(err.message, true); }
+  if (await send(cd, fn.replaceAll("_", " "), fn, args, value, check, payee)) load(id);
+});
+$("#register").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  try {
+    const n = items.length, args = [f.url.value.trim(), f.title.value, toWei(f.reward.value), toWei(f.fee.value)];
+    if (await send(cd, "Register article", "register_article", args, toWei(f.pool.value), async () => (await cd.read("get_articles", [0, 1])).total === n + 1)) { f.reset(); load(n); }
+  } catch (err) { status(err.message, true); }
+});
+wireWallet((a) => { me = a; if (view.id !== null) show(); });
+load();
+</script>
+
+<footer><div class="w"><span>Built on <a href="https://genlayer.com">GenLayer</a></span><a href="https://github.com/cris-the-dev/genlayer-correctiondesk">Source</a></div></footer>
+<script>
+document.getElementById("sites").innerHTML=[["ProofBounty","proofbounty"],["ProofBounty v2","proofbounty-v2"],["IC Security Audit","ic-security-audit"],["Oracle Kit","oracle-kit"],["Workshop","workshop"],["Security Docs","docs-security"],["Rainfall Insurance","rainfall-insurance"],["DealCourt","dealcourt"],["GoalStake","goalstake"],["MandateGuard","mandateguard"],["SLA Bond","slabond"],["Attest","attest"],["SponsorPay","sponsorpay"],["ModCourt","modcourt"],["CorrectionDesk","correctiondesk"]]
+ .map(([n,s])=>`<a href="https://${s}.cristhedev.com"${s==="correctiondesk"?' aria-current="page"':""}>${n}</a>`).join("");
+</script>
+</body></html>
