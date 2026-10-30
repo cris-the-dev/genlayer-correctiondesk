@@ -59,8 +59,17 @@ export function contract(address) {
   return {
     address,
     // Reads the finalized state: what the page shows cannot be rolled back by an appeal.
-    read: async (functionName, args = []) =>
-      plain(await reader.readContract({ address, functionName, args, jsonSafeReturn: false, transactionHashVariant: "latest-final" })),
+    // A dropped request ("Failed to fetch": RPC hiccup, flaky network) is retried; a contract error is not.
+    read: async (functionName, args = []) => {
+      for (let i = 0; ; i++) {
+        try {
+          return plain(await reader.readContract({ address, functionName, args, jsonSafeReturn: false, transactionHashVariant: "latest-final" }));
+        } catch (e) {
+          if (i >= 4 || !/fetch|network|timed? ?out/i.test(e.message)) throw e;
+          await sleep(1500 * (i + 1));
+        }
+      }
+    },
     // Sends a tx through MetaMask and resolves only once it is FINALIZED with a successful execution result.
     // `payee`: the address the call may pay; its transfer's gas is allocated from this tx's fee deposit.
     write: async (functionName, args = [], value = 0n, { onHash, onProgress, payee } = {}) => {
